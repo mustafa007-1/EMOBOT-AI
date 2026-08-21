@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EmoVoice • AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .glass { background: rgba(255, 255, 255, 0.08); backdrop-filter: blur(16px); }
+        
+        .record-btn { transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+        .recording { animation: pulse-ring 2s infinite; }
+        @keyframes pulse-ring {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+            70% { box-shadow: 0 0 0 30px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .wave { animation: soundwave 1.2s infinite ease-in-out; }
+        @keyframes soundwave {
+            0%, 100% { height: 6px; }
+            50% { height: 28px; }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-zinc-950 to-zinc-900 text-white min-h-screen">
+    <div class="max-w-2xl mx-auto px-6 py-12">
+        <div class="text-center mb-12">
+            <h1 class="text-5xl font-bold tracking-tight mb-3">EmoVoice <span class="text-violet-400">AI</span></h1>
+            <p class="text-zinc-400 text-lg">Multimodal Speech Emotion Recognition</p>
+        </div>
+
+        <!-- Live Recording -->
+        <div class="glass border border-white/10 rounded-3xl p-10 shadow-2xl mb-8">
+            <div class="flex items-center justify-between mb-8">
+                <h2 class="text-2xl font-semibold flex items-center gap-3">
+                    <i class="fa-solid fa-microphone"></i> Live Recording
+                </h2>
+                <div id="status" class="text-xs uppercase tracking-widest px-4 py-2 rounded-full bg-white/5 text-emerald-400 font-medium">
+                    Ready
+                </div>
+            </div>
+
+            <button id="recordBtn" 
+                class="record-btn w-full h-32 bg-red-600 hover:bg-red-700 rounded-2xl text-2xl font-semibold flex items-center justify-center gap-4 focus:outline-none">
+                <i class="fa-solid fa-microphone text-3xl"></i>
+                <span id="recordText">HOLD TO RECORD</span>
+            </button>
+
+            <div id="liveIndicator" class="hidden flex justify-center gap-1 mt-6">
+                <div class="wave w-2 bg-red-500 rounded-full"></div>
+                <div class="wave w-2 bg-red-500 rounded-full" style="animation-delay: 150ms"></div>
+                <div class="wave w-2 bg-red-500 rounded-full" style="animation-delay: 300ms"></div>
+            </div>
+        </div>
+
+        <!-- Upload -->
+        <div class="glass border border-white/10 rounded-3xl p-8 mb-8">
+            <h2 class="text-xl font-semibold mb-6 flex items-center gap-3">
+                <i class="fa-solid fa-upload"></i> Upload Audio File
+            </h2>
+            <div class="flex gap-4">
+                <label class="flex-1 cursor-pointer border-2 border-dashed border-white/20 hover:border-violet-400 rounded-2xl p-8 text-center transition-all">
+                    <i class="fa-solid fa-cloud-arrow-up text-4xl mb-4 text-zinc-400"></i>
+                    <p class="font-medium">Choose WAV, MP3 or WebM</p>
+                    <input type="file" id="fileInput" accept="audio/*" class="hidden">
+                </label>
+                <button id="uploadBtn" class="px-10 bg-violet-600 hover:bg-violet-700 rounded-2xl font-semibold transition-all">Analyze</button>
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div id="resultArea" class="hidden glass border border-white/10 rounded-3xl p-8">
+            <h2 class="text-2xl font-semibold mb-6 flex items-center gap-3">
+                <i class="fa-solid fa-chart-bar"></i> Analysis Result
+            </h2>
+            <div id="results" class="space-y-6"></div>
+        </div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        const recordBtn = document.getElementById('recordBtn');
+        const recordText = document.getElementById('recordText');
+        const liveIndicator = document.getElementById('liveIndicator');
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const resultArea = document.getElementById('resultArea');
+        const resultsDiv = document.getElementById('results');
+        const status = document.getElementById('status');
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 } 
+                });
+
+                const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+                    ? { mimeType: 'audio/webm;codecs=opus' } 
+                    : { mimeType: 'audio/webm' };
+
+                mediaRecorder = new MediaRecorder(stream, options);
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    audioChunks = [];
+                    stream.getTracks().forEach(track => track.stop());
+
+                    if (audioBlob.size < 5000) {
+                        alert("Recording too short or silent. Please speak louder.");
+                        resetUI();
+                        return;
+                    }
+                    processAudio(audioBlob, "live_recording.webm");
+                    resetUI();
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+                recordBtn.classList.add('recording', 'scale-105', 'bg-red-700');
+                recordText.textContent = "RELEASE TO STOP";
+                liveIndicator.classList.remove('hidden');
+                status.textContent = "Recording";
+                status.classList.add('bg-red-500/20', 'text-red-400');
+            } catch (err) {
+                alert("Microphone access denied.");
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+        }
+
+        function resetUI() {
+            recordBtn.classList.remove('recording', 'scale-105', 'bg-red-700');
+            recordText.textContent = "HOLD TO RECORD";
+            liveIndicator.classList.add('hidden');
+            status.textContent = "Ready";
+            status.classList.remove('bg-red-500/20', 'text-red-400');
+        }
+
+        async function processAudio(audioData, filename) {
+            resultArea.classList.remove('hidden');
+            resultsDiv.innerHTML = `
+                <div class="flex justify-center py-12">
+                    <div class="animate-spin w-10 h-10 border-4 border-violet-500 border-t-transparent rounded-full"></div>
+                </div>
+            `;
+
+            const formData = new FormData();
+            formData.append("file", audioData, filename);
+
+            try {
+                const res = await fetch("http://127.0.0.1:8000/analyze", { method: "POST", body: formData });
+                const data = await res.json();
+                displayResults(data);
+            } catch (err) {
+                resultsDiv.innerHTML = `<p class="text-red-400 text-center">Connection Error</p>`;
+            }
+        }
+
+        function displayResults(data) {
+            const textConf = (data.text_intent.confidence * 100).toFixed(0);
+            const voiceConf = (data.voice_emotion.confidence * 100).toFixed(0);
+
+            resultsDiv.innerHTML = `
+                <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
+                    <p class="text-zinc-400 text-sm mb-1">Transcript</p>
+                    <p class="text-lg">"${data.transcript}"</p>
+                </div>
+
+                <div class="grid grid-cols-2 gap-6">
+                    <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
+                        <p class="text-violet-400 text-sm font-medium">TEXT INTENT</p>
+                        <p class="text-4xl font-bold mt-2">${data.text_intent.label}</p>
+                        <div class="mt-4 h-2 bg-zinc-700 rounded-full overflow-hidden">
+                            <div class="h-full bg-violet-500 transition-all" style="width: ${textConf}%"></div>
+                        </div>
+                        <p class="text-right text-sm text-zinc-400 mt-1">${textConf}%</p>
+                    </div>
+
+                    <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
+                        <p class="text-amber-400 text-sm font-medium">VOICE EMOTION</p>
+                        <p class="text-4xl font-bold mt-2 capitalize">${data.voice_emotion.label}</p>
+                        <div class="mt-4 h-2 bg-zinc-700 rounded-full overflow-hidden">
+                            <div class="h-full bg-amber-500 transition-all" style="width: ${voiceConf}%"></div>
+                        </div>
+                        <p class="text-right text-sm text-zinc-400 mt-1">${voiceConf}%</p>
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-r from-violet-600 to-fuchsia-600 rounded-3xl p-8 text-center">
+                    <p class="uppercase text-xs tracking-widest opacity-75">Fusion Decision</p>
+                    <p class="text-2xl font-semibold mt-3">${data.fusion_decision}</p>
+                </div>
+            `;
+        }
+
+        // Event Listeners
+        recordBtn.addEventListener('mousedown', startRecording);
+        recordBtn.addEventListener('mouseup', stopRecording);
+        recordBtn.addEventListener('mouseleave', stopRecording);
+        recordBtn.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); });
+        recordBtn.addEventListener('touchend', e => { e.preventDefault(); stopRecording(); });
+
+        uploadBtn.addEventListener('click', () => {
+            const file = fileInput.files[0];
+            if (file) processAudio(file, file.name);
+            else alert("Please select a file");
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) uploadBtn.click();
+        });
+    </script>
+</body>
+</html>

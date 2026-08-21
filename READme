@@ -1,0 +1,7 @@
+install requriements
+bash command :-
+  cd backend
+  uvicorn app:app --reload 
+
+GO TO index.html and then press GO live button in the botton of screen on the right corner (use VScode)
+
