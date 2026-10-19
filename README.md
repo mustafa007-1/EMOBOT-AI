@@ -1,5 +1,7 @@
 # EmoVoice AI — Multimodal Speech Emotion Recognition
 
+[![tests](https://github.com/mustafa007-1/EMOBOT-AI/actions/workflows/tests.yml/badge.svg)](https://github.com/mustafa007-1/EMOBOT-AI/actions/workflows/tests.yml)
+
 EmoVoice AI listens to **what** you say and **how** you say it, then fuses both signals to catch emotions that text-only systems miss: sarcasm, quiet disappointment, hidden frustration.
 
 > *"Great job."* said through gritted teeth → text says **positive**, voice says **angry** → **Sarcasm or Passive-Aggressive Tone Detected**
@@ -58,8 +60,8 @@ The two paths are **independent**: if no speech is recognized, or the ASR servic
 
 ### 1. Prerequisites
 
-- **Python 3.10 – 3.13**
-- **FFmpeg** on your `PATH`
+- **Python 3.10 – 3.13.** Python 3.14 does not work yet: TensorFlow publishes no 3.14 wheels. If several versions are installed on Windows, pick one explicitly with `py -3.13 -m venv .venv`.
+- **FFmpeg** (including `ffprobe`) on your `PATH`
   - Windows: `winget install Gyan.FFmpeg` (then open a new terminal)
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
@@ -72,7 +74,7 @@ The two paths are **independent**: if no speech is recognized, or the ASR servic
 git clone https://github.com/mustafa007-1/EMOBOT-AI.git
 cd EMOBOT-AI
 
-python -m venv .venv
+python -m venv .venv            # Windows with Python 3.14 as default: py -3.13 -m venv .venv
 # Windows:      .venv\Scripts\activate
 # macOS/Linux:  source .venv/bin/activate
 
@@ -108,7 +110,7 @@ Allow microphone access when the browser asks.
 - **Live recording:** press and hold **HOLD TO RECORD**, speak, release.
 - **Upload:** pick a `.wav`, `.mp3`, `.webm`, `.m4a`, `.ogg`, `.flac` or `.mp4` file (max 10 MB, 0.3 – 30 s).
 
-The result card shows the transcript, text intent with confidence, voice emotion with confidence, the fused decision, and which modalities contributed.
+The result card shows the transcript, text intent with confidence, voice emotion with confidence, the fused decision, which modalities contributed, and a breakdown of all 8 voice-emotion probabilities. The record button also works from the keyboard: focus it and hold Space or Enter.
 
 Try these to see fusion at work:
 
@@ -155,6 +157,7 @@ curl -X POST http://127.0.0.1:8000/analyze -F "file=@sample.wav"
 
 | Field | Values |
 |---|---|
+| `transcript` | Recognized text, or `null` when nothing was transcribed (`asr_status` says why) |
 | `text_intent.label` | `POSITIVE`, `NEGATIVE`, `NEUTRAL` (low-confidence polarity), or `N/A` (no speech) |
 | `text_intent.raw_label` | The sentiment model's original output before the neutral threshold |
 | `fusion_mode` | `multimodal` · `text_only` (voice confidence too low) · `voice_only` (no speech recognized) · `none` |
@@ -166,8 +169,10 @@ curl -X POST http://127.0.0.1:8000/analyze -F "file=@sample.wav"
 |---|---|
 | 413 | File larger than the upload limit |
 | 415 | Unsupported file extension |
-| 422 | Empty, undecodable, too short or too long audio |
+| 422 | Empty, undecodable, silent, too short or too long audio |
 | 500 | Unexpected server error (details in the server log) |
+
+Oversized uploads are refused from their `Content-Length` header before the body is read, and audio is decoded only up to the length limit, so a small but very long compressed file cannot exhaust memory. All error responses carry CORS headers, so the browser shows the real message.
 
 ### `GET /health`
 
@@ -227,7 +232,7 @@ Clips longer than 3.5 s are scored with 50 %-overlapping windows whose probabili
 
 ## Training your own model
 
-1. Download RAVDESS from [Kaggle](https://www.kaggle.com/datasets/uwrfkaggler/ravdess-emotional-speech-audio) and extract it into `data/RAVDEES DATASET/`. Any nesting works; duplicate copies of the same clip are detected and skipped automatically.
+1. Download RAVDESS from [Kaggle](https://www.kaggle.com/datasets/uwrfkaggler/ravdess-emotional-speech-audio) and extract it into `data/ravdess/`. Any nesting works; duplicate copies of the same clip are detected and skipped automatically, and so are song clips if you downloaded the full RAVDESS release.
 2. Train:
 
 ```bash
@@ -260,7 +265,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The suite covers every fusion rule, feature parity with the original training code, the API's success and failure paths (using fake models — no internet needed), and a smoke test against the real `.keras` model. FFmpeg is required.
+The suite covers every fusion rule, feature parity with the original training code, the API's success and failure paths (using fake models — no internet needed) including a real browser-style WebM/Opus upload, RAVDESS filename parsing, and a smoke test against the real `.keras` model. FFmpeg is required. GitHub Actions runs the same suite on every push and pull request.
 
 ---
 
@@ -268,6 +273,7 @@ The suite covers every fusion rule, feature parity with the original training co
 
 ```
 EMOBOT-AI/
+├── .github/workflows/tests.yml  # CI: pytest on every push / PR
 ├── backend/
 │   ├── app.py          # FastAPI app: validation, preprocessing, inference, response
 │   ├── features.py     # MFCC extraction shared by training and serving
@@ -277,9 +283,11 @@ EMOBOT-AI/
 ├── models/
 │   └── ser_lstm_model.keras
 ├── data/
-│   └── RAVDEES DATASET/  # put the dataset here (not committed)
+│   ├── README.md       # where to get the dataset
+│   └── ravdess/        # put the dataset here (not committed)
 ├── tests/              # pytest suite
 ├── train_model.py      # training script (CLI)
+├── pyproject.toml      # pytest configuration
 ├── requirements.txt
 └── requirements-dev.txt
 ```
