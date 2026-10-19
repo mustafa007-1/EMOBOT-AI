@@ -43,13 +43,17 @@ log = logging.getLogger("train")
 # Data loading
 # ----------------------------------------------------------------------------
 def parse_ravdess_name(filename: str) -> tuple[int, int] | None:
-    """Return (emotion_index 0..7, actor_id) from a RAVDESS filename, or None if it isn't one.
+    """Return (emotion_index 0..7, actor_id) from a RAVDESS speech filename, or None otherwise.
 
     Format: modality-channel-emotion-intensity-statement-repetition-actor.wav
     e.g. 03-01-05-02-01-01-12.wav -> emotion 05 (angry), actor 12.
+    Song clips (vocal channel 02) are rejected: the full RAVDESS release ships
+    them with the same naming scheme, and the model is trained on speech only.
     """
     parts = Path(filename).stem.split("-")
     if len(parts) != 7 or not all(p.isdigit() for p in parts):
+        return None
+    if int(parts[1]) != 1:  # vocal channel: 01 = speech, 02 = song
         return None
     emotion, actor = int(parts[2]), int(parts[6])
     if not 1 <= emotion <= len(EMOTIONS):
@@ -67,7 +71,7 @@ def load_dataset(data_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     if not data_dir.is_dir():
         sys.exit(f"Dataset folder not found: {data_dir.resolve()}\n"
-                 "Download RAVDESS (see data/RAVDEES DATASET/ReadMe.md) or pass --data-dir.")
+                 "Download RAVDESS (see data/README.md) or pass --data-dir.")
 
     unique: dict[str, Path] = {}
     duplicates = skipped = 0
@@ -81,7 +85,7 @@ def load_dataset(data_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         else:
             unique[path.name] = path
 
-    log.info("Found %d unique RAVDESS clips (%d duplicates ignored, %d non-RAVDESS files skipped)",
+    log.info("Found %d unique RAVDESS clips (%d duplicates ignored, %d song/non-RAVDESS files skipped)",
              len(unique), duplicates, skipped)
     if not unique:
         sys.exit("No RAVDESS .wav files found. Check --data-dir.")
@@ -151,7 +155,7 @@ def build_model():
 # ----------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", type=Path, default=Path("data/RAVDEES DATASET"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data/ravdess"))
     parser.add_argument("--output", type=Path, default=Path("models/ser_lstm_model.keras"))
     parser.add_argument("--split", choices=["random", "actor"], default="random",
                         help="random: stratified clip split; actor: speaker-independent split")

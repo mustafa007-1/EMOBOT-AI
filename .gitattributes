@@ -1,0 +1,3 @@
+# Store text with LF line endings; check out per platform.
+* text=auto
+*.keras binary

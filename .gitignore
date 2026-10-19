@@ -5,8 +5,10 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
 
-# Dataset (download separately — see data/RAVDEES DATASET/ReadMe.md)
+# Dataset (download separately, see data/README.md)
+data/ravdess/
 data/**/*.wav
 data/**/*.zip
 
