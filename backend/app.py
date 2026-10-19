@@ -65,6 +65,11 @@ TEXT_NEUTRAL_THRESHOLD = float(os.getenv("EMOVOICE_TEXT_NEUTRAL_THRESHOLD", str(
 ASR_LANGUAGE = os.getenv("EMOVOICE_ASR_LANGUAGE", "en-US")
 ASR_TIMEOUT_SECONDS = float(os.getenv("EMOVOICE_ASR_TIMEOUT", "10"))
 ALLOWED_EXTENSIONS = {".webm", ".wav", ".mp3", ".m4a", ".ogg", ".flac", ".mp4"}
+# Clips whose loudest sample is below this level are treated as silence
+# (muted or unplugged microphone) instead of being classified.
+SILENCE_DBFS = -60.0
+# Room for multipart boundaries and part headers on top of the file itself.
+MULTIPART_OVERHEAD_BYTES = 64 * 1024
 
 
 # ----------------------------------------------------------------------------
@@ -140,8 +145,11 @@ def make_google_transcriber() -> Callable[[str], Optional[str]]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("FFmpeg was not found on PATH. Install it and restart the server.")
+    # pydub decodes with ffmpeg and probes every non-WAV upload with ffprobe;
+    # without either one, uploads would fail later with a misleading 422.
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]
+    if missing:
+        raise RuntimeError(f"{' and '.join(missing)} not found on PATH. Install FFmpeg and restart the server.")
     if getattr(app.state, "models", None) is None:  # tests inject fakes beforehand
         app.state.models = Models(acoustic=load_acoustic_model(),
                                   sentiment=load_sentiment_model(),
@@ -150,7 +158,26 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="EmoVoice AI — Multimodal Emotion Fusion API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="EmoVoice AI — Multimodal Emotion Fusion API", version="2.1.0", lifespan=lifespan)
+
+
+def too_large_message() -> str:
+    return f"File too large (max {MAX_UPLOAD_BYTES / (1024 * 1024):g} MB)."
+
+
+# Registered before CORSMiddleware so that CORS wraps it: a 413 the browser
+# cannot read (no CORS headers) would look like the backend being down.
+@app.middleware("http")
+async def reject_oversized_requests(request: Request, call_next):
+    """Refuse oversized uploads from their Content-Length header, before the
+    body is spooled to disk. save_upload() still enforces the limit for
+    chunked uploads that send no Content-Length."""
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES:
+        return JSONResponse(status_code=413, content={"detail": too_large_message()})
+    return await call_next(request)
+
+
 # No cookies or auth are used, so credentials stay disabled; a wildcard origin
 # combined with credentials would let any website make authenticated calls.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False,
@@ -173,7 +200,7 @@ class VoiceEmotionOut(BaseModel):
 
 
 class AnalysisOut(BaseModel):
-    transcript: str
+    transcript: Optional[str]  # None when no speech was recognized (see asr_status)
     text_intent: TextIntentOut
     voice_emotion: VoiceEmotionOut
     fusion_decision: str
@@ -189,21 +216,24 @@ class AnalysisOut(BaseModel):
 def save_upload(upload: UploadFile, destination: Path) -> None:
     """Copy the upload to disk, rejecting anything over MAX_UPLOAD_BYTES."""
     if upload.size is not None and upload.size > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
+        raise HTTPException(413, too_large_message())
     written = 0
     with destination.open("wb") as out:
         while chunk := upload.file.read(1024 * 1024):
             written += len(chunk)
             if written > MAX_UPLOAD_BYTES:
-                raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
+                raise HTTPException(413, too_large_message())
             out.write(chunk)
     if written == 0:
         raise HTTPException(422, "Uploaded file is empty.")
 
 
 def decode_audio(path: Path) -> AudioSegment:
+    """Decode at most MAX_AUDIO_SECONDS + 1 s. A small, highly compressed file
+    can hold hours of audio; decoding all of it would exhaust memory before
+    the duration check ever ran."""
     try:
-        return AudioSegment.from_file(str(path))
+        return AudioSegment.from_file(str(path), duration=MAX_AUDIO_SECONDS + 1)
     except Exception as exc:  # pydub raises several exception types for corrupt input
         logger.info("Could not decode %s: %s", path.name, exc)
         raise HTTPException(422, "Could not decode the audio file. Is it a valid audio recording?") from exc
@@ -230,8 +260,20 @@ def health(request: Request) -> dict:
 # stays free to accept concurrent requests.
 @app.post("/analyze", response_model=AnalysisOut)
 def analyze_audio(request: Request, file: UploadFile = File(...)) -> AnalysisOut:
+    try:
+        return run_analysis(request.app.state.models, file)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Re-raised as an HTTPException so the response passes through
+        # CORSMiddleware. Starlette's last-resort 500 handler sits outside it,
+        # so the browser would report a network error instead of this message.
+        logger.exception("Analysis failed")
+        raise HTTPException(500, "Internal server error. Check the server logs.") from exc
+
+
+def run_analysis(models: Models, file: UploadFile) -> AnalysisOut:
     started = time.perf_counter()
-    models: Models = request.app.state.models
 
     extension = Path(file.filename or "recording.webm").suffix.lower() or ".webm"
     if extension not in ALLOWED_EXTENSIONS:
@@ -248,8 +290,10 @@ def analyze_audio(request: Request, file: UploadFile = File(...)) -> AnalysisOut
         duration = len(segment) / 1000.0
         if duration < MIN_AUDIO_SECONDS:
             raise HTTPException(422, f"Recording too short ({duration:.2f}s). Please speak for at least a second.")
-        if duration > MAX_AUDIO_SECONDS:
-            raise HTTPException(422, f"Recording too long ({duration:.0f}s, max {MAX_AUDIO_SECONDS:.0f}s).")
+        if duration > MAX_AUDIO_SECONDS:  # decoding stops just past the limit, so the true length is unknown
+            raise HTTPException(422, f"Recording too long (max {MAX_AUDIO_SECONDS:g} s).")
+        if segment.max_dBFS < SILENCE_DBFS:
+            raise HTTPException(422, "No sound detected. Check that your microphone is on and not muted.")
 
         mono = segment.set_channels(1)
         # Acoustic copy keeps the native sample rate: the model was trained on
@@ -274,17 +318,13 @@ def analyze_audio(request: Request, file: UploadFile = File(...)) -> AnalysisOut
     text_intent = classify_text_intent(raw_label, text_score, TEXT_NEUTRAL_THRESHOLD)
     fusion = fuse(text_intent, voice_label, voice_score, VOICE_THRESHOLD)
 
-    if transcript is None:
-        transcript = ("Speech recognition service unavailable — check your internet connection."
-                      if asr_status == "unavailable" else "Could not understand the speech in this audio.")
-
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     logger.info("analyze: %.1fs audio | text=%s(%.2f) voice=%s(%.2f) -> %s [%s] in %d ms",
                 duration, text_intent, text_score, voice_label, voice_score,
                 fusion.decision, fusion.mode, elapsed_ms)
 
     return AnalysisOut(
-        transcript=transcript,
+        transcript=transcript or None,
         text_intent=TextIntentOut(label=text_intent.upper() if text_intent else "N/A",
                                   confidence=round(text_score, 2), raw_label=raw_label),
         voice_emotion=VoiceEmotionOut(label=voice_label, confidence=round(voice_score, 4),
