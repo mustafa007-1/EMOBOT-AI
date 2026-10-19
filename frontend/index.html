@@ -81,9 +81,13 @@
     </div>
 
     <script>
+        // Backend URL. Override without editing code: index.html?api=http://host:port
+        const API_BASE = new URLSearchParams(location.search).get('api') || 'http://127.0.0.1:8000';
+
         let mediaRecorder;
         let audioChunks = [];
-        let isRecording = false;
+        let buttonHeld = false;   // true while the user is pressing the record button
+        let isBusy = false;       // true while a request is in flight
 
         const recordBtn = document.getElementById('recordBtn');
         const recordText = document.getElementById('recordText');
@@ -94,11 +98,26 @@
         const resultsDiv = document.getElementById('results');
         const status = document.getElementById('status');
 
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
         async function startRecording() {
+            if (isBusy || (mediaRecorder && mediaRecorder.state === "recording")) return;
+            buttonHeld = true;
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 } 
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: true, noiseSuppression: true }
                 });
+
+                // The permission prompt / mic startup is async: if the button was
+                // released meanwhile, don't start a recording that nothing will stop.
+                if (!buttonHeld) {
+                    stream.getTracks().forEach(track => track.stop());
+                    return;
+                }
 
                 const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
                     ? { mimeType: 'audio/webm;codecs=opus' } 
@@ -124,19 +143,24 @@
                 };
 
                 mediaRecorder.start();
-                isRecording = true;
                 recordBtn.classList.add('recording', 'scale-105', 'bg-red-700');
                 recordText.textContent = "RELEASE TO STOP";
                 liveIndicator.classList.remove('hidden');
                 status.textContent = "Recording";
                 status.classList.add('bg-red-500/20', 'text-red-400');
             } catch (err) {
-                alert("Microphone access denied.");
+                buttonHeld = false;
+                alert("Microphone access denied or unavailable.");
             }
         }
 
         function stopRecording() {
+            buttonHeld = false;
             if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+        }
+
+        function showError(message) {
+            resultsDiv.innerHTML = `<p class="text-red-400 text-center">${escapeHtml(message)}</p>`;
         }
 
         function resetUI() {
@@ -158,29 +182,47 @@
             const formData = new FormData();
             formData.append("file", audioData, filename);
 
+            isBusy = true;
+            uploadBtn.disabled = true;
             try {
-                const res = await fetch("http://127.0.0.1:8000/analyze", { method: "POST", body: formData });
-                const data = await res.json();
+                const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: formData });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showError(data.detail || `Server error (${res.status})`);
+                    return;
+                }
                 displayResults(data);
             } catch (err) {
-                resultsDiv.innerHTML = `<p class="text-red-400 text-center">Connection Error</p>`;
+                showError(`Cannot reach the backend at ${API_BASE}. Is the server running?`);
+            } finally {
+                isBusy = false;
+                uploadBtn.disabled = false;
             }
         }
+
+        const MODE_LABELS = {
+            multimodal: 'Text + Voice',
+            text_only: 'Text only (voice confidence low)',
+            voice_only: 'Voice only (no speech recognized)',
+            none: 'No usable signal'
+        };
 
         function displayResults(data) {
             const textConf = (data.text_intent.confidence * 100).toFixed(0);
             const voiceConf = (data.voice_emotion.confidence * 100).toFixed(0);
+            const mode = MODE_LABELS[data.fusion_mode] || '';
+            const timing = data.processing_ms ? ` • ${(data.processing_ms / 1000).toFixed(2)}s` : '';
 
             resultsDiv.innerHTML = `
                 <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
                     <p class="text-zinc-400 text-sm mb-1">Transcript</p>
-                    <p class="text-lg">"${data.transcript}"</p>
+                    <p class="text-lg">"${escapeHtml(data.transcript)}"</p>
                 </div>
 
                 <div class="grid grid-cols-2 gap-6">
                     <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
                         <p class="text-violet-400 text-sm font-medium">TEXT INTENT</p>
-                        <p class="text-4xl font-bold mt-2">${data.text_intent.label}</p>
+                        <p class="text-4xl font-bold mt-2">${escapeHtml(data.text_intent.label)}</p>
                         <div class="mt-4 h-2 bg-zinc-700 rounded-full overflow-hidden">
                             <div class="h-full bg-violet-500 transition-all" style="width: ${textConf}%"></div>
                         </div>
@@ -189,7 +231,7 @@
 
                     <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
                         <p class="text-amber-400 text-sm font-medium">VOICE EMOTION</p>
-                        <p class="text-4xl font-bold mt-2 capitalize">${data.voice_emotion.label}</p>
+                        <p class="text-4xl font-bold mt-2 capitalize">${escapeHtml(data.voice_emotion.label)}</p>
                         <div class="mt-4 h-2 bg-zinc-700 rounded-full overflow-hidden">
                             <div class="h-full bg-amber-500 transition-all" style="width: ${voiceConf}%"></div>
                         </div>
@@ -199,7 +241,8 @@
 
                 <div class="bg-gradient-to-r from-violet-600 to-fuchsia-600 rounded-3xl p-8 text-center">
                     <p class="uppercase text-xs tracking-widest opacity-75">Fusion Decision</p>
-                    <p class="text-2xl font-semibold mt-3">${data.fusion_decision}</p>
+                    <p class="text-2xl font-semibold mt-3">${escapeHtml(data.fusion_decision)}</p>
+                    <p class="text-xs opacity-75 mt-3">${escapeHtml(mode + timing)}</p>
                 </div>
             `;
         }
