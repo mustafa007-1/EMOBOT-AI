@@ -64,8 +64,8 @@
             <div class="flex gap-4">
                 <label class="flex-1 cursor-pointer border-2 border-dashed border-white/20 hover:border-violet-400 rounded-2xl p-8 text-center transition-all">
                     <i class="fa-solid fa-cloud-arrow-up text-4xl mb-4 text-zinc-400"></i>
-                    <p class="font-medium">Choose WAV, MP3 or WebM</p>
-                    <input type="file" id="fileInput" accept="audio/*" class="hidden">
+                    <p id="fileLabel" class="font-medium">Choose WAV, MP3, M4A, OGG, FLAC or WebM</p>
+                    <input type="file" id="fileInput" accept=".wav,.mp3,.webm,.m4a,.ogg,.flac,.mp4,audio/*" class="hidden">
                 </label>
                 <button id="uploadBtn" class="px-10 bg-violet-600 hover:bg-violet-700 rounded-2xl font-semibold transition-all">Analyze</button>
             </div>
@@ -83,9 +83,22 @@
     <script>
         // Backend URL. Override without editing code: index.html?api=http://host:port
         const API_BASE = new URLSearchParams(location.search).get('api') || 'http://127.0.0.1:8000';
+        const MAX_UPLOAD_MB = 10;            // keep in sync with EMOVOICE_MAX_UPLOAD_MB
+        const MIN_RECORDING_MS = 500;
+        // First format this browser can record. Safari records MP4, not WebM.
+        const RECORDING_FORMATS = [
+            { mimeType: 'audio/webm;codecs=opus', ext: 'webm' },
+            { mimeType: 'audio/webm', ext: 'webm' },
+            { mimeType: 'audio/mp4', ext: 'mp4' },
+            { mimeType: 'audio/ogg;codecs=opus', ext: 'ogg' },
+        ];
+        const recordingFormat = window.MediaRecorder
+            ? RECORDING_FORMATS.find(f => MediaRecorder.isTypeSupported(f.mimeType))
+            : undefined;
 
         let mediaRecorder;
         let audioChunks = [];
+        let recordingStartedAt = 0;
         let buttonHeld = false;   // true while the user is pressing the record button
         let isBusy = false;       // true while a request is in flight
 
@@ -93,6 +106,7 @@
         const recordText = document.getElementById('recordText');
         const liveIndicator = document.getElementById('liveIndicator');
         const fileInput = document.getElementById('fileInput');
+        const fileLabel = document.getElementById('fileLabel');
         const uploadBtn = document.getElementById('uploadBtn');
         const resultArea = document.getElementById('resultArea');
         const resultsDiv = document.getElementById('results');
@@ -106,6 +120,10 @@
 
         async function startRecording() {
             if (isBusy || (mediaRecorder && mediaRecorder.state === "recording")) return;
+            if (!navigator.mediaDevices || !window.MediaRecorder) {
+                alert("Recording needs a modern browser on http://localhost or https. Try uploading a file instead.");
+                return;
+            }
             buttonHeld = true;
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
@@ -119,30 +137,29 @@
                     return;
                 }
 
-                const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-                    ? { mimeType: 'audio/webm;codecs=opus' } 
-                    : { mimeType: 'audio/webm' };
-
-                mediaRecorder = new MediaRecorder(stream, options);
+                mediaRecorder = recordingFormat
+                    ? new MediaRecorder(stream, { mimeType: recordingFormat.mimeType })
+                    : new MediaRecorder(stream);
+                const ext = recordingFormat ? recordingFormat.ext : 'webm';
                 audioChunks = [];
 
                 mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
 
                 mediaRecorder.onstop = () => {
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
                     audioChunks = [];
                     stream.getTracks().forEach(track => track.stop());
+                    resetUI();
 
-                    if (audioBlob.size < 5000) {
-                        alert("Recording too short or silent. Please speak louder.");
-                        resetUI();
+                    if (Date.now() - recordingStartedAt < MIN_RECORDING_MS) {
+                        alert("Recording too short. Hold the button while you speak.");
                         return;
                     }
-                    processAudio(audioBlob, "live_recording.webm");
-                    resetUI();
+                    processAudio(audioBlob, `live_recording.${ext}`);
                 };
 
                 mediaRecorder.start();
+                recordingStartedAt = Date.now();
                 recordBtn.classList.add('recording', 'scale-105', 'bg-red-700');
                 recordText.textContent = "RELEASE TO STOP";
                 liveIndicator.classList.remove('hidden');
@@ -150,7 +167,9 @@
                 status.classList.add('bg-red-500/20', 'text-red-400');
             } catch (err) {
                 buttonHeld = false;
-                alert("Microphone access denied or unavailable.");
+                alert(err && err.name === 'NotAllowedError'
+                    ? "Microphone access was denied. Allow it in the browser's site settings."
+                    : "Could not start recording: " + (err && err.message ? err.message : "microphone unavailable."));
             }
         }
 
@@ -207,6 +226,33 @@
             none: 'No usable signal'
         };
 
+        const NO_TRANSCRIPT = {
+            unavailable: 'Speech recognition service unavailable. Check your internet connection.',
+            no_speech: 'No words recognized in this audio.'
+        };
+
+        function transcriptHtml(data) {
+            if (data.transcript) return `<p class="text-lg">"${escapeHtml(data.transcript)}"</p>`;
+            const note = NO_TRANSCRIPT[data.asr_status] || NO_TRANSCRIPT.no_speech;
+            return `<p class="text-lg text-zinc-500 italic">${escapeHtml(note)}</p>`;
+        }
+
+        function distributionHtml(probabilities) {
+            return Object.entries(probabilities || {})
+                .sort((a, b) => b[1] - a[1])
+                .map(([emotion, p]) => {
+                    const pct = (p * 100).toFixed(0);
+                    return `
+                        <div class="flex items-center gap-3 text-sm">
+                            <span class="w-20 capitalize text-zinc-400">${escapeHtml(emotion)}</span>
+                            <div class="flex-1 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                                <div class="h-full bg-amber-500/80" style="width: ${pct}%"></div>
+                            </div>
+                            <span class="w-10 text-right text-zinc-400">${pct}%</span>
+                        </div>`;
+                }).join('');
+        }
+
         function displayResults(data) {
             const textConf = (data.text_intent.confidence * 100).toFixed(0);
             const voiceConf = (data.voice_emotion.confidence * 100).toFixed(0);
@@ -216,7 +262,7 @@
             resultsDiv.innerHTML = `
                 <div class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
                     <p class="text-zinc-400 text-sm mb-1">Transcript</p>
-                    <p class="text-lg">"${escapeHtml(data.transcript)}"</p>
+                    ${transcriptHtml(data)}
                 </div>
 
                 <div class="grid grid-cols-2 gap-6">
@@ -244,6 +290,11 @@
                     <p class="text-2xl font-semibold mt-3">${escapeHtml(data.fusion_decision)}</p>
                     <p class="text-xs opacity-75 mt-3">${escapeHtml(mode + timing)}</p>
                 </div>
+
+                <details class="bg-zinc-900/70 rounded-2xl p-6 border border-white/10">
+                    <summary class="cursor-pointer text-zinc-400 text-sm">Voice emotion breakdown</summary>
+                    <div class="space-y-2 mt-4">${distributionHtml(data.voice_emotion.probabilities)}</div>
+                </details>
             `;
         }
 
@@ -253,15 +304,27 @@
         recordBtn.addEventListener('mouseleave', stopRecording);
         recordBtn.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); });
         recordBtn.addEventListener('touchend', e => { e.preventDefault(); stopRecording(); });
+        // Keyboard: hold Space or Enter while the button has focus.
+        const isRecordKey = e => e.key === ' ' || e.key === 'Enter';
+        recordBtn.addEventListener('keydown', e => {
+            if (!isRecordKey(e)) return;
+            e.preventDefault();
+            if (!e.repeat) startRecording();
+        });
+        recordBtn.addEventListener('keyup', e => { if (isRecordKey(e)) { e.preventDefault(); stopRecording(); } });
+        recordBtn.addEventListener('blur', stopRecording);
 
         uploadBtn.addEventListener('click', () => {
             const file = fileInput.files[0];
-            if (file) processAudio(file, file.name);
-            else alert("Please select a file");
+            if (!file) return alert("Please select a file");
+            if (file.size > MAX_UPLOAD_MB * 1024 * 1024) return alert(`File too large (max ${MAX_UPLOAD_MB} MB).`);
+            processAudio(file, file.name);
         });
 
         fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) uploadBtn.click();
+            if (fileInput.files.length === 0) return;
+            fileLabel.textContent = fileInput.files[0].name;
+            uploadBtn.click();
         });
     </script>
 </body>
